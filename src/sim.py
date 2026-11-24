@@ -1,8 +1,11 @@
 import argparse
-from unittest import result
+from datetime import datetime
 from analysis import analyze_result_sets
 from qiskit import QuantumRegister, QuantumCircuit, ClassicalRegister, transpile
 from qiskit_aer import AerSimulator
+from matplotlib import pyplot as plt
+import numpy as np
+import os
 import random
 
 qbit_lookup_table = [
@@ -50,14 +53,11 @@ def generateBob(n: int, circuit, transmission, bob):
     return bases  # Return the bases used by Bob for potential analysis
 
 def generateEve(n: int, circuit, transmission, fraction, eve):
-    bases = [random.randint(0, 1) for _ in range(n)]
-    num_not_eavesdropped = int(n * (1-fraction))
+    bases = [-1 for _ in range(n)]
+    indices_to_eavesdrop = random.sample(range(n), int(n * fraction))
 
-    for i in range(num_not_eavesdropped):
-        #randomly select a qubit to not eavesdrop on
-        qubit_index = random.randint(0, n - 1)
-        # Mark this qubit as not eavesdropped
-        bases[qubit_index] = -1  # Use -1 to indicate this qubit is not to be eavesdropped
+    for i in range(len(indices_to_eavesdrop)):
+        bases[indices_to_eavesdrop[i]] = random.randint(0, 1)
 
     for i in range(n):
         if bases[i] == -1:
@@ -88,18 +88,16 @@ def key_checking(alice_bases, bob_bases, alice_bits, result, pass_back_fraction=
     Returns:        error_rate (float): The error rate between Alice and Bob's bits for the checked bases across all shots.
                     eve_detection_rate (float): The rate at which Eve is detected across all shots.
     """
-
     # Confirm which bases matched between Alice and Bob.
     correct_bases_indices = [i for i in range(len(alice_bases)) if alice_bases[i] == bob_bases[i]]
     # Check the bits for the indices where the bases matched for every shot.
     # We only want to check part of the bits where the bases matched, so we randomly select a fraction of the correct bases to check.
-    check_bases = [correct_bases_indices[random.randint(0, len(correct_bases_indices) - 1)] for _ in range(int(len(correct_bases_indices) * pass_back_fraction))]
-
+    check_bases = random.sample(correct_bases_indices, int(max(len(correct_bases_indices) * pass_back_fraction, 1)))
     errors = 0
     eve_detection_rate = 0.0
     for i in range(len(result.get_memory())):
         shot = result.get_memory()[i]
-        bob_bits = [int(shot.split()[0][::-1][check_bases[j]]) for j in range(len(check_bases))]
+        bob_bits = [int(shot.split()[-1][::-1][check_bases[j]]) for j in range(len(check_bases))]
 
         shot_errors = 0
         for j in range(len(check_bases)):
@@ -113,7 +111,7 @@ def key_checking(alice_bases, bob_bases, alice_bits, result, pass_back_fraction=
 
     return error_rate, eve_detection_rate
 
-def run_simulation(n: int, do_eavesdropping: bool = False, eve_fraction: float = 0.5, shots: int = 1, pass_back_fraction: float = 0.5, eve_confidence: float = 0.25, debug: bool = False):
+def run_simulation(n: int, do_eavesdropping: bool = False, eve_fraction: float = 0.5, shots: int = 1, output: str = "output/", save_circuit: bool = False, debug: bool = False):
     transmission = QuantumRegister(n, "transmission")
     bob = ClassicalRegister(n, "bob")
     eve = ClassicalRegister(n, "eve") if do_eavesdropping else None
@@ -127,29 +125,23 @@ def run_simulation(n: int, do_eavesdropping: bool = False, eve_fraction: float =
     compile = transpile(circuit, backend)
     result = backend.run(compile, shots=shots, memory=True).result()
 
-    bob_bits = [int(result.get_memory()[0].split()[0][::-1][i]) for i in range(n)]  # Reverse the string to match the order of qubits
-    eve_bits = [int(result.get_memory()[0].split()[1][::-1][i]) if do_eavesdropping else None for i in range(n)]
-
     # Count the errors between Alice's and Bob's bases
     error_count = 0
     for i in range(n):
         if alice_bases[i] != bob_bases[i]:
             error_count += 1
 
-    error_rate, eve_detection_rate = key_checking(alice_bases, bob_bases, alice_bits, result, pass_back_fraction=0.5, eve_confidence=0.25)
-
     if debug:
         print("Alice's Bases:           ", [basis_lookup_table[alice_bases[i]] for i in range(n)])
         print("Bob's Bases:             ", [basis_lookup_table[bob_bases[i]] for i in range(n)])
         print("Eve's Bases:             ", [basis_lookup_table[eve_bases[i]] if eve_bases[i] != -1 else "N" for i in range(n)]) if do_eavesdropping else None
-        print("Alice's Bits (shot #1):  ", alice_bits)
-        print("Bob's Bits (shot #1):    ", bob_bits)
-        print("Eve's Bits (shot #1):    ", eve_bits) if do_eavesdropping else None
         print("Basis Error Rate Between Alice and Bob:  {:.2f}%".format((error_count / n) * 100))
-        print("Key Checking Error Rate:                 {:.2f}%".format(error_rate * 100))
-        print("Eve Detection Rate:                      {:.2f}%".format(eve_detection_rate * 100))
         print(circuit.draw())
-        
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if save_circuit:
+        circuit.draw(output="mpl", filename=f"{output}circuit_{timestamp}")
+        plt.close()
+
     return alice_bases, alice_bits, bob_bases, eve_bases, result
 
 if __name__ == "__main__":
@@ -165,10 +157,17 @@ if __name__ == "__main__":
     )
     parser.add_argument("-s", type=int, help="number of simulations to run with -n (default: 1)")
     parser.add_argument("-shots", type=int, default=1, help="number of shots for each simulation (default: 1)")
-    parser.add_argument("-o", type=str, default="output", help="output directory for plots")
-    parser.add_argument("-eve-fraction", type=float, help="fraction of qubits that Eve will eavesdrop on (between 0 and 1)")
-    parser.add_argument("-pass-back-fraction", type=float, default=0.5, help="fraction of bits to pass back for key checking (between 0 and 1)")
-    parser.add_argument("-eve-confidence", type=float, default=0.25, help="confidence level for detecting Eve's presence (between 0 and 1)")
+    parser.add_argument("-o", type=str, default="output/", help="output directory for plots")
+    eve_variance = parser.add_mutually_exclusive_group(required=False)
+    eve_variance.add_argument("-e", type=float, help="percentage of bits that eve will attempt to observe for every simulation (0.0 to 1.0)")
+    eve_variance.add_argument(
+        "-eve-discovery-variance",
+        type=float,
+        nargs=3,
+        metavar=("START", "STOP", "STEP"),
+        help="run a set of simulations per eve fraction from START through STOP by STEP, will save a figure that relates the error rate to the eve fraction."
+    )
+    parser.add_argument("--save_circuit", action="store_true", help="save each quantum circuit as an image at the output directory")
     parser.add_argument("--debug", "-d", action="store_true", help="enable debug mode for detailed output")
     args = parser.parse_args()
 
@@ -176,14 +175,14 @@ if __name__ == "__main__":
         parser.error("-n must be a positive integer")
     if args.s is not None and args.s <= 0:
         parser.error("-s must be a positive integer")
-    if args.eve_fraction is not None and (args.eve_fraction <= 0 or args.eve_fraction > 1):
-        parser.error("-eve-fraction must be between 0 and 1")
     if args.shots <= 0:
         parser.error("-shots must be a positive integer")
 
     if args.simulation_range is not None:
         if args.s is not None:
             parser.error("-s cannot be combined with -simulation-range")
+        if args.eve_discovery_variance is not None:
+            parser.error("-eve-discovery-variance cannot be combined with -simulation-range")
         start, stop, step = args.simulation_range
         if start <= 0 or stop <= 0 or step <= 0:
             parser.error("-simulation-range values must be positive integers")
@@ -193,13 +192,27 @@ if __name__ == "__main__":
     else:
         bit_counts = [args.n] * (args.s if args.s is not None else 1)
 
+    if args.eve_discovery_variance is not None:
+        if args.e is not None:
+            parser.error("-e cannot be combined with -eve-discovery-variance")
+        start, stop, step = args.eve_discovery_variance
+        if start < 0.0 or stop < 0.0 or step <= 0.0 or start > 1.0 or stop > 1.0 or step > 1.0:
+            parser.error("-eve-discovery-variance values must be non-negative, less than or equal to 1.0, and step must be positive")
+        if start > stop:
+            parser.error("the START value for -eve-discovery-variance must not exceed STOP")
+        eve_fractions = []
+        for i in range(args.s):
+            eve_fractions.extend(np.arange(start, stop, step).tolist())
+    else:
+        eve_fractions = [args.e] * args.s if args.e is not None else [0] * args.s
+
     output_dir = args.o
-    do_eavesdropping = args.eve_fraction is not None
-    eve_fraction = args.eve_fraction if do_eavesdropping else 0
-    pass_back_fraction = args.pass_back_fraction
-    eve_confidence = args.eve_confidence
+    if not os.path.exists(output_dir):
+        parser.error("The output directory must exist!")
+    do_eavesdropping = args.e is not None or args.eve_discovery_variance is not None
     debug = args.debug
     shots = args.shots
+    save_circuit = args.save_circuit
 
     print("Running Simulations...")
     result_sets = []
@@ -207,19 +220,36 @@ if __name__ == "__main__":
     alice_bits_sets = []
     bob_bases_sets = []
 
-    for i, n in enumerate(bit_counts):
-        print(f"Simulation {i + 1}/{len(bit_counts)}: n = {n}")
-        alice_bases, alice_bits, bob_bases, eve_bases, result = run_simulation(
-            n,
-            do_eavesdropping = do_eavesdropping,
-            eve_fraction = eve_fraction,
-            shots = shots,
-            pass_back_fraction = pass_back_fraction,
-            eve_confidence = eve_confidence,
-            debug = debug
-        )
-        result_sets.append(result)
-        alice_bases_sets.append(alice_bases)
-        alice_bits_sets.append(alice_bits)
-        bob_bases_sets.append(bob_bases)
-    analyze_result_sets(result_sets, alice_bases_sets, bob_bases_sets, alice_bits_sets, output_dir)
+    if args.eve_discovery_variance is None:
+        for i, n in enumerate(bit_counts):
+            print(f"Simulation {i + 1}/{len(bit_counts)}: n = {n}")
+            alice_bases, alice_bits, bob_bases, eve_bases, result = run_simulation(
+                n,
+                do_eavesdropping = do_eavesdropping,
+                eve_fraction = args.e if args.e is not None else 0.0,
+                shots = shots,
+                output = output_dir,
+                save_circuit = save_circuit,
+                debug = debug
+            )
+            result_sets.append(result)
+            alice_bases_sets.append(alice_bases)
+            alice_bits_sets.append(alice_bits)
+            bob_bases_sets.append(bob_bases)
+    else:
+        for i, e in enumerate(eve_fractions):
+            print(f"Simulation {i + 1}/{len(eve_fractions)}: eve_fraction = {e}")
+            alice_bases, alice_bits, bob_bases, eve_bases, result = run_simulation(
+                n = args.n,
+                do_eavesdropping = True,
+                eve_fraction = e,
+                shots = shots,
+                output = output_dir,
+                save_circuit = save_circuit,
+                debug = debug
+            )
+            result_sets.append(result)
+            alice_bases_sets.append(alice_bases)
+            alice_bits_sets.append(alice_bits)
+            bob_bases_sets.append(bob_bases)
+    analyze_result_sets(result_sets, alice_bases_sets, bob_bases_sets, alice_bits_sets, args)
